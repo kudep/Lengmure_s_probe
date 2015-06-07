@@ -9,15 +9,19 @@
 // Эта задержка для защиты от продолжительной подачи высокого напряжения в результате долгого ответа сервера
 #define TRANS_DELAY_MS 10000
 #define INIT_STATE_TRANS false
+//параметры АЦП количество съемов и период усреднения в миллисекундах
+#define ADC_REPEAT 20
+#define ADC_MEAN_PERIOD 20
 
 byte num_cmnd, DAC_init_volt, DAC_volt, DAC_step, DAC_count_step, DAC_delay, DAC_repeat, present_step, num;
-int16_t ADC_V, ADC_I, data[4];
-bool state_trans;
+int ADC_V, ADC_I, data[4];
+bool state_trans, filter_mode;
 bool trans_ask1,trans_ask2;//переменная регистрирует ответ сервера на передачу
-
+//unsigned long time;
 
 
 void setup() {
+	//time = 0;
 
 	pinMode(PIN_RELAY_1, OUTPUT);
 	pinMode(PIN_RELAY_2, OUTPUT);
@@ -42,6 +46,11 @@ void setup() {
 void loop() {
 	init_cmd();
 	driver();
+	/*if (time_wait(&time, 1000))
+	{
+		time_check(&time);
+		Serial.println(filter_mode);
+	}*/
 }
 void init_cmd()
 {
@@ -129,16 +138,26 @@ void init_cmd()
 		num_cmnd++;
 		return;
 
-	case 12://Ожидание следующего байта команды, отвечающего за количество повторений
+	case 12://Ожидание следующего байта команды, отвечающего за режим работы фильтра
 		if (Serial.available())
 		{
 			num_cmnd++;
 		}
 		return;
-	case 13://Определение количество повторений
+	case 13://Определение работы фильтра
+		init_filter_mode(serial_read());
+		num_cmnd++;
+		return;
+	case 14://Ожидание следующего байта команды, отвечающего за количество повторений
+		if (Serial.available())
+		{
+			num_cmnd++;
+		}
+		return;
+	case 15://Определение количество повторений
 		init_repeat(serial_read());
 		//debag();//!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!debag
-		num_cmnd=0;
+		num_cmnd = 0;
 		num = 0;
 		state_trans = INIT_STATE_TRANS;
 		return;
@@ -194,6 +213,10 @@ void init_repeat(byte cmnd)
 {
 	DAC_repeat = cmnd;
 }
+void init_filter_mode(byte cmnd)
+{
+	filter_mode = (0!=cmnd);
+}
 void driver()
 {
 
@@ -217,7 +240,18 @@ void driver()
 		
 		return;
 	case 2:
-		detect();
+		if (filter_mode)
+		{
+			if (detect_filter_on()) num++;
+		}
+		else
+		{
+			detect_filter_off();
+			num++;
+		}
+
+		return;
+	case 3:
 		if (present_step < DAC_count_step)
 		{
 			volt_out(DAC_volt);
@@ -230,7 +264,7 @@ void driver()
 		else
 			init_driver();
 		return;
-	case 3: 
+	case 4: 
 		if (transiv()) num = 1;
 		return;
 	default://Обнуление счетчика
@@ -257,20 +291,55 @@ void time_check(unsigned long *time_control)
 }
 bool time_wait(unsigned long *time_control, uint16_t delay)
 {
-	return (millis() - (*time_control))>delay * 10;
+	return (millis() - (*time_control))>delay;
 }
-void detect()
+bool detect_filter_on()
+{
+	static unsigned long time_control1 = 0;
+	static unsigned long time_control2 = 0;
+	static uint8_t rtr1 = 0;
+	static uint8_t rtr2 = 0;
+	/*
+	Serial.print("Hell");
+	Serial.print(rtr1);*/
+	if (state_trans)
+	{
+		ADC_read_filter_on(PIN_ADC_V, data, &time_control1, &rtr1);
+		ADC_read_filter_on(PIN_ADC_I, data + 1, &time_control2, &rtr2);
+		if ((rtr1 == ADC_REPEAT) && (rtr2 == ADC_REPEAT))
+		{
+			time_control1 = time_control2 = rtr1 = rtr2 = 0;
+			state_trans = false;
+			return true;
+		}
+		return false;
+	}
+	else
+	{
+		ADC_read_filter_on(PIN_ADC_V, data + 2, &time_control1, &rtr1);
+		ADC_read_filter_on(PIN_ADC_I, data + 3, &time_control2, &rtr2);
+		if ((rtr1 == ADC_REPEAT) && (rtr2 == ADC_REPEAT))
+		{
+			time_control1 = time_control2 = rtr1 = rtr2 = 0;
+			state_trans = true;
+			return true;
+		}
+		return false;
+	}
+}
+
+void detect_filter_off()
 {
 	if (state_trans)
 	{
-		data[0] = ADC_read(PIN_ADC_V);
-		data[1] = ADC_read(PIN_ADC_I);
+		data[0] = ADC_read_filter_off(PIN_ADC_V);
+		data[1] = ADC_read_filter_off(PIN_ADC_I);
 		state_trans = false;
 	}
 	else
 	{
-		data[2] = ADC_read(PIN_ADC_V);
-		data[3] = ADC_read(PIN_ADC_I);
+		data[2] = ADC_read_filter_off(PIN_ADC_V);
+		data[3] = ADC_read_filter_off(PIN_ADC_I);
 		state_trans = true;
 	}
 }
@@ -316,12 +385,25 @@ bool transiv()
 	}
 	
 }
-int ADC_read(byte pin)
+void ADC_read_filter_on(byte pin, int *data, unsigned long *time_control, uint8_t *rtr)
+{
+	static int time_delt = ADC_MEAN_PERIOD / ADC_REPEAT;//Миллисекунды
+	if (((*rtr)<ADC_REPEAT) && time_wait(time_control, time_delt))
+	{
+		if ((*rtr) == 0)(*data) = 0;
+			time_check(time_control);
+			(*data) += analogRead(pin);
+			(*rtr)++;
+			if ((*rtr) == ADC_REPEAT) (*data) /= ADC_REPEAT;
+	}
+}
+
+int ADC_read_filter_off(byte pin)
 {
 	unsigned int read_sum = 0;
-	for (int i = 0; i < 16; i++)
+	for (int i = 0; i < ADC_REPEAT; i++)
 		read_sum += analogRead(pin);
-	return read_sum >> 4;
+	return read_sum / ADC_REPEAT;
 }
 void init_driver(void)
 {
