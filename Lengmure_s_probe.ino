@@ -12,10 +12,13 @@
 //параметры АЦП количество съемов и период усреднения в миллисекундах
 #define ADC_REPEAT 20
 #define ADC_MEAN_PERIOD 20
+//параметры АЦП количество съемов и период усреднения в миллисекундах
+#define CURRENT_SECR_TIME 20
+#define CURRENT_SECR_VALUE 901
 
 byte num_cmnd, DAC_init_volt, DAC_volt, DAC_step, DAC_count_step, DAC_delay, DAC_repeat, present_step, num;
 int ADC_V, ADC_I, data[4];
-bool state_trans, filter_mode;
+bool state_trans, filter_mode, current_mode;
 bool trans_ask1,trans_ask2;//переменная регистрирует ответ сервера на передачу
 //unsigned long time;
 
@@ -39,6 +42,7 @@ void setup() {
 	Serial.begin(9600, SERIAL_8E1);
 	num_cmnd = DAC_repeat = num=0;
 	state_trans = INIT_STATE_TRANS;
+	current_mode = false;//Отключина защита по току
 	trans_ask1 = false;//Ответ не получен
 	trans_ask2 = false;//Ответ не верен
 	//debag();//!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!debag
@@ -46,6 +50,7 @@ void setup() {
 void loop() {
 	init_cmd();
 	driver();
+	current_security();
 	/*if (time_wait(&time, 1000))
 	{
 		time_check(&time);
@@ -145,7 +150,7 @@ void init_cmd()
 		}
 		return;
 	case 13://Определение работы фильтра
-		init_filter_mode(serial_read());
+		init_special_mode(serial_read());
 		num_cmnd++;
 		return;
 	case 14://Ожидание следующего байта команды, отвечающего за количество повторений
@@ -213,9 +218,10 @@ void init_repeat(byte cmnd)
 {
 	DAC_repeat = cmnd;
 }
-void init_filter_mode(byte cmnd)
+void init_special_mode(byte cmnd)
 {
-	filter_mode = (0!=cmnd);
+	current_mode = (0 != (cmnd & 2));
+	filter_mode = (0!=(cmnd&1));
 }
 void driver()
 {
@@ -422,6 +428,19 @@ void trans_ask(void)
 {
 	trans_ask1 = true;
 	if ('F' == (char)Serial.read())trans_ask2 = true;
+}
+void current_security(void)
+{
+	if (current_mode)
+	{
+		while (ADC_read_filter_off(PIN_ADC_I) > CURRENT_SECR_VALUE)
+		{
+			volt_out(DAC_init_volt);
+			delay(CURRENT_SECR_TIME);
+			volt_out(DAC_volt);
+		}
+
+	}
 }
 void debag()
 {
